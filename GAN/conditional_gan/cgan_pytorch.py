@@ -7,14 +7,16 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import os
 from torch.autograd import Variable
-from tensorflow.examples.tutorials.mnist import input_data
+from torchvision import datasets, transforms
 
-
-mnist = input_data.read_data_sets('../../MNIST_data', one_hot=True)
 mb_size = 64
+transform = transforms.Compose([transforms.ToTensor()])
+mnist = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+dataloader = torch.utils.data.DataLoader(mnist, batch_size=mb_size, shuffle=True)
+dataiter = iter(dataloader)
 Z_dim = 100
-X_dim = mnist.train.images.shape[1]
-y_dim = mnist.train.labels.shape[1]
+X_dim = mnist.data.shape[2]*mnist.data.shape[1]
+y_dim = 16
 h_dim = 128
 cnt = 0
 lr = 1e-3
@@ -30,6 +32,7 @@ def xavier_init(size):
 
 Wzh = xavier_init(size=[Z_dim + y_dim, h_dim])
 bzh = Variable(torch.zeros(h_dim), requires_grad=True)
+yemb = torch.nn.Embedding(10, y_dim)
 
 Whx = xavier_init(size=[h_dim, X_dim])
 bhx = Variable(torch.zeros(X_dim), requires_grad=True)
@@ -58,7 +61,7 @@ def D(X, c):
     return y
 
 
-G_params = [Wzh, bzh, Whx, bhx]
+G_params = [Wzh, bzh, Whx, bhx, yemb.weight]
 D_params = [Wxh, bxh, Why, bhy]
 params = G_params + D_params
 
@@ -76,24 +79,32 @@ def reset_grad():
 G_solver = optim.Adam(G_params, lr=1e-3)
 D_solver = optim.Adam(D_params, lr=1e-3)
 
-ones_label = Variable(torch.ones(mb_size, 1))
-zeros_label = Variable(torch.zeros(mb_size, 1))
+ones_label = torch.ones(mb_size, 1)
+zeros_label = torch.zeros(mb_size, 1)
 
+def sample_X():
+    global dataiter
+    try:
+        X, Y = dataiter.next()
+    except:
+        dataiter = iter(dataloader)
+        X, Y = dataiter.next()
+    return X, Y
 
 for it in range(100000):
     # Sample data
-    z = Variable(torch.randn(mb_size, Z_dim))
-    X, c = mnist.train.next_batch(mb_size)
-    X = Variable(torch.from_numpy(X))
-    c = Variable(torch.from_numpy(c.astype('float32')))
+    X, c0 = sample_X()
+    z = torch.randn(X.shape[0], Z_dim)
+    c = yemb(c0)
+    X = X.view(X.shape[0], -1)
 
     # Dicriminator forward-loss-backward-update
     G_sample = G(z, c)
     D_real = D(X, c)
     D_fake = D(G_sample, c)
 
-    D_loss_real = nn.binary_cross_entropy(D_real, ones_label)
-    D_loss_fake = nn.binary_cross_entropy(D_fake, zeros_label)
+    D_loss_real = nn.binary_cross_entropy(D_real, ones_label[:X.shape[0]])
+    D_loss_fake = nn.binary_cross_entropy(D_fake, zeros_label[:X.shape[0]])
     D_loss = D_loss_real + D_loss_fake
 
     D_loss.backward()
@@ -103,11 +114,12 @@ for it in range(100000):
     reset_grad()
 
     # Generator forward-loss-backward-update
-    z = Variable(torch.randn(mb_size, Z_dim))
+    z = torch.randn(X.shape[0], Z_dim)
+    c = yemb(c0)
     G_sample = G(z, c)
     D_fake = D(G_sample, c)
 
-    G_loss = nn.binary_cross_entropy(D_fake, ones_label)
+    G_loss = nn.binary_cross_entropy(D_fake, ones_label[:X.shape[0]])
 
     G_loss.backward()
     G_solver.step()

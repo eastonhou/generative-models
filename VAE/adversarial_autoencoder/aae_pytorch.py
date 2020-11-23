@@ -8,110 +8,113 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import os
 from torch.autograd import Variable
-from tensorflow.examples.tutorials.mnist import input_data
+from torchvision import datasets, transforms
+#from tensorflow.examples.tutorials.mnist import input_data
 
-
-mnist = input_data.read_data_sets('../../MNIST_data', one_hot=True)
-mb_size = 32
+transform = transforms.Compose([transforms.ToTensor()])
+mnist = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+dataloader = torch.utils.data.DataLoader(mnist, batch_size=100, shuffle=True)
+dataiter = iter(dataloader)
+#mnist = input_data.read_data_sets('../../MNIST_data', one_hot=True)
+mb_size = 100
 z_dim = 5
-X_dim = mnist.train.images.shape[1]
-y_dim = mnist.train.labels.shape[1]
+X_dim = mnist.data.shape[2]*mnist.data.shape[1]
+#y_dim = mnist.data.shape[1]
 h_dim = 128
 cnt = 0
 lr = 1e-3
 
 
 # Encoder
-Q = torch.nn.Sequential(
+encoder = torch.nn.Sequential(
     torch.nn.Linear(X_dim, h_dim),
     torch.nn.ReLU(),
     torch.nn.Linear(h_dim, z_dim)
-)
+).to(0)
 
 # Decoder
-P = torch.nn.Sequential(
+decoder = torch.nn.Sequential(
     torch.nn.Linear(z_dim, h_dim),
     torch.nn.ReLU(),
     torch.nn.Linear(h_dim, X_dim),
     torch.nn.Sigmoid()
-)
+).to(0)
 
 # Discriminator
-D = torch.nn.Sequential(
+descriminator = torch.nn.Sequential(
     torch.nn.Linear(z_dim, h_dim),
     torch.nn.ReLU(),
     torch.nn.Linear(h_dim, 1),
     torch.nn.Sigmoid()
-)
+).to(0)
 
 
 def reset_grad():
-    Q.zero_grad()
-    P.zero_grad()
-    D.zero_grad()
+    encoder.zero_grad()
+    decoder.zero_grad()
+    descriminator.zero_grad()
 
 
 def sample_X(size, include_y=False):
-    X, y = mnist.train.next_batch(size)
-    X = Variable(torch.from_numpy(X))
+    global dataiter
+    try:
+        X, Y = dataiter.next()
+    except:
+        dataiter = iter(dataloader)
+        X, Y = dataiter.next()
+    if include_y: return X, Y
+    else: return X
 
-    if include_y:
-        y = np.argmax(y, axis=1).astype(np.int)
-        y = Variable(torch.from_numpy(y))
-        return X, y
 
-    return X
-
-
-Q_solver = optim.Adam(Q.parameters(), lr=lr)
-P_solver = optim.Adam(P.parameters(), lr=lr)
-D_solver = optim.Adam(D.parameters(), lr=lr)
+encoder_optim = optim.Adam(encoder.parameters(), lr=lr)
+decoder_optim = optim.Adam(decoder.parameters(), lr=lr)
+descriminator_optim = optim.Adam(descriminator.parameters(), lr=lr)
 
 
 for it in range(1000000):
-    X = sample_X(mb_size)
+    X = sample_X(mb_size).to(0)
+    X = X.view(X.shape[0], -1)
 
     """ Reconstruction phase """
-    z_sample = Q(X)
-    X_sample = P(z_sample)
+    z_sample = encoder(X)
+    X_sample = decoder(z_sample)
 
     recon_loss = nn.binary_cross_entropy(X_sample, X)
 
     recon_loss.backward()
-    P_solver.step()
-    Q_solver.step()
+    decoder_optim.step()
+    encoder_optim.step()
     reset_grad()
 
     """ Regularization phase """
     # Discriminator
-    z_real = Variable(torch.randn(mb_size, z_dim))
-    z_fake = Q(X)
+    z_real = torch.randn(mb_size, z_dim).to(0)
+    z_fake = encoder(X)
 
-    D_real = D(z_real)
-    D_fake = D(z_fake)
+    D_real = descriminator(z_real)
+    D_fake = descriminator(z_fake)
 
     D_loss = -torch.mean(torch.log(D_real) + torch.log(1 - D_fake))
 
     D_loss.backward()
-    D_solver.step()
+    descriminator_optim.step()
     reset_grad()
 
     # Generator
-    z_fake = Q(X)
-    D_fake = D(z_fake)
+    z_fake = encoder(X)
+    D_fake = descriminator(z_fake)
 
     G_loss = -torch.mean(torch.log(D_fake))
 
     G_loss.backward()
-    Q_solver.step()
+    encoder_optim.step()
     reset_grad()
 
     # Print and plot every now and then
     if it % 1000 == 0:
-        print('Iter-{}; D_loss: {:.4}; G_loss: {:.4}; recon_loss: {:.4}'
-              .format(it, D_loss.data[0], G_loss.data[0], recon_loss.data[0]))
+        print(f'Iter-{it}; D_loss: {D_loss.item():.4}; G_loss: {G_loss.item():.4}; recon_loss: {recon_loss.item():.4}')
 
-        samples = P(z_real).data.numpy()[:16]
+        samples = decoder(z_real).detach().cpu().numpy()[:16]
 
         fig = plt.figure(figsize=(4, 4))
         gs = gridspec.GridSpec(4, 4)
