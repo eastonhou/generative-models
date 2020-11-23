@@ -21,63 +21,52 @@ h_dim = 128
 cnt = 0
 lr = 1e-3
 
-
-def xavier_init(size):
-    in_dim = size[0]
-    xavier_stddev = 1. / np.sqrt(in_dim / 2.)
-    return Variable(torch.randn(*size) * xavier_stddev, requires_grad=True)
-
-
 """ ==================== GENERATOR ======================== """
+class Generator(torch.nn.Module):
+    def __init__(self):
+        super(__class__, self).__init__()
+        self.embeddings = torch.nn.Embedding(10, y_dim)
+        self.layers = torch.nn.Sequential(
+            torch.nn.Linear(Z_dim+y_dim, h_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(h_dim, X_dim),
+            torch.nn.Sigmoid())
 
-Wzh = xavier_init(size=[Z_dim + y_dim, h_dim])
-bzh = Variable(torch.zeros(h_dim), requires_grad=True)
-yemb = torch.nn.Embedding(10, y_dim)
-
-Whx = xavier_init(size=[h_dim, X_dim])
-bhx = Variable(torch.zeros(X_dim), requires_grad=True)
-
-
-def G(z, c):
-    inputs = torch.cat([z, c], 1)
-    h = nn.relu(inputs @ Wzh + bzh.repeat(inputs.size(0), 1))
-    X = nn.sigmoid(h @ Whx + bhx.repeat(h.size(0), 1))
-    return X
-
+    def forward(self, z, c):
+        c = self.embeddings(c)
+        inputs = torch.cat([z, c], 1)
+        y = self.layers(inputs)
+        return y
 
 """ ==================== DISCRIMINATOR ======================== """
+class Discriminator(torch.nn.Module):
+    def __init__(self):
+        super(__class__, self).__init__()
+        self.embeddings = torch.nn.Embedding(10, y_dim)
+        self.layers = torch.nn.Sequential(
+            torch.nn.Linear(X_dim+y_dim, h_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(h_dim, 1),
+            torch.nn.Sigmoid())
 
-Wxh = xavier_init(size=[X_dim + y_dim, h_dim])
-bxh = Variable(torch.zeros(h_dim), requires_grad=True)
-
-Why = xavier_init(size=[h_dim, 1])
-bhy = Variable(torch.zeros(1), requires_grad=True)
-
-
-def D(X, c):
-    inputs = torch.cat([X, c], 1)
-    h = nn.relu(inputs @ Wxh + bxh.repeat(inputs.size(0), 1))
-    y = nn.sigmoid(h @ Why + bhy.repeat(h.size(0), 1))
-    return y
-
-
-G_params = [Wzh, bzh, Whx, bhx, yemb.weight]
-D_params = [Wxh, bxh, Why, bhy]
-params = G_params + D_params
+    def forward(self, X, c):
+        c = self.embeddings(c)
+        inputs = torch.cat([X, c], 1)
+        y = self.layers(inputs)
+        return y
 
 
-""" ===================== TRAINING ======================== """
-
-
-def reset_grad():
-    for p in params:
-        if p.grad is not None:
-            data = p.grad.data
-            p.grad = Variable(data.new().resize_as_(data).zero_())
-
-
+generator = Generator()
+discriminator = Discriminator()
+G_params = generator.parameters()
+D_params = discriminator.parameters()
 G_solver = optim.Adam(G_params, lr=1e-3)
 D_solver = optim.Adam(D_params, lr=1e-3)
+""" ===================== TRAINING ======================== """
+
+def reset_grad():
+    G_solver.zero_grad()
+    D_solver.zero_grad()
 
 ones_label = torch.ones(mb_size, 1)
 zeros_label = torch.zeros(mb_size, 1)
@@ -93,20 +82,19 @@ def sample_X():
 
 for it in range(100000):
     # Sample data
-    X, c0 = sample_X()
+    X, c = sample_X()
     z = torch.randn(X.shape[0], Z_dim)
-    c = yemb(c0)
     X = X.view(X.shape[0], -1)
 
     # Dicriminator forward-loss-backward-update
-    G_sample = G(z, c)
-    D_real = D(X, c)
-    D_fake = D(G_sample, c)
+    G_sample = generator(z, c)
+    D_real = discriminator(X, c)
+    D_fake = discriminator(G_sample, c)
 
-    D_loss_real = nn.binary_cross_entropy(D_real, ones_label[:X.shape[0]])
-    D_loss_fake = nn.binary_cross_entropy(D_fake, zeros_label[:X.shape[0]])
-    D_loss = D_loss_real + D_loss_fake
-
+    #D_loss_real = nn.binary_cross_entropy(D_real, ones_label[:X.shape[0]])
+    #D_loss_fake = nn.binary_cross_entropy(D_fake, zeros_label[:X.shape[0]])
+    #D_loss = D_loss_real + D_loss_fake
+    D_loss = -torch.mean(torch.log(D_real) + torch.log(1 - D_fake))
     D_loss.backward()
     D_solver.step()
 
@@ -115,11 +103,11 @@ for it in range(100000):
 
     # Generator forward-loss-backward-update
     z = torch.randn(X.shape[0], Z_dim)
-    c = yemb(c0)
-    G_sample = G(z, c)
-    D_fake = D(G_sample, c)
+    G_sample = generator(z, c)
+    D_fake = discriminator(G_sample, c)
 
-    G_loss = nn.binary_cross_entropy(D_fake, ones_label[:X.shape[0]])
+    #G_loss = nn.binary_cross_entropy(D_fake, ones_label[:X.shape[0]])
+    G_loss = -torch.mean(torch.log(D_fake))
 
     G_loss.backward()
     G_solver.step()
@@ -131,10 +119,8 @@ for it in range(100000):
     if it % 1000 == 0:
         print('Iter-{}; D_loss: {}; G_loss: {}'.format(it, D_loss.data.numpy(), G_loss.data.numpy()))
 
-        c = np.zeros(shape=[mb_size, y_dim], dtype='float32')
-        c[:, np.random.randint(0, 10)] = 1.
-        c = Variable(torch.from_numpy(c))
-        samples = G(z, c).data.numpy()[:16]
+        c = torch.arange(0, mb_size) % 10
+        samples = generator(z, c).detach().numpy()[:16]
 
         fig = plt.figure(figsize=(4, 4))
         gs = gridspec.GridSpec(4, 4)
